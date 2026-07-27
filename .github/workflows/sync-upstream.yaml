@@ -17,6 +17,11 @@ jobs:
         with:
           fetch-depth: 0
           ref: develop
+          # Push with a PAT (if configured) so the branch push triggers build.yaml.
+          # Pushes made with the default GITHUB_TOKEN do NOT trigger workflow runs
+          # (GitHub suppresses them to prevent recursion). Falls back to the default
+          # token when SYNC_PAT is unset — the bot still runs, just without pre-merge CI.
+          token: ${{ secrets.SYNC_PAT || github.token }}
 
       - name: Configure git identity
         run: |
@@ -38,7 +43,7 @@ jobs:
           echo "count=$count" >> "$GITHUB_OUTPUT"
           echo "Found $count new upstream commit(s)."
 
-      - name: Update sync branch (triggers CI via push)
+      - name: Update sync branch (push via SYNC_PAT triggers CI)
         if: steps.check.outputs.count != '0'
         run: |
           set -euo pipefail

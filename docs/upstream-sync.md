@@ -12,9 +12,22 @@ tab → "Sync upstream develop" → "Run workflow"). It:
 2. Force-updates the `sync/upstream-develop` branch to upstream's head.
 3. Opens (or refreshes) a PR into `develop` summarizing the new commits.
 
-Pushing the branch fires the existing CI (`build.yaml` runs on `push` to any branch), so
-the sync PR shows lint + test results for that exact commit — no personal access token
-required.
+For the sync PR to show **pre-merge** CI, a `SYNC_PAT` secret must be configured (see the
+next section). Pushes made with the default `GITHUB_TOKEN` do not trigger workflow runs —
+GitHub suppresses them to prevent recursion — so without the PAT the sync PR has no
+pre-merge checks and CI runs only after you merge to `develop`.
+
+## One-time: SYNC_PAT for pre-merge CI
+
+Create a fine-grained personal access token scoped to this repository with
+**Contents: write**, then store it as a secret:
+```bash
+gh secret set SYNC_PAT --repo <owner>/comictagger
+```
+The sync workflow checks out with this token, so its branch push triggers `build.yaml` on
+the sync branch and the PR shows lint + test results for that exact commit. If the secret
+is absent the workflow still runs (it falls back to the default token), but the sync PR
+gets no pre-merge CI.
 
 ## Merging a sync PR
 
@@ -33,23 +46,23 @@ required.
   git add requirements-dev.lock && git commit -m "build: relock after upstream sync"
   ```
 
-## Security note: sync PRs run upstream code in CI
+## Security note: pre-merge CI runs upstream code
 
-Pushing the `sync/upstream-develop` branch triggers the existing CI (`build.yaml` on
-`push`), which runs upstream's code (`tox`, `pip install`, build steps) **before** a human
-reviews the diff. This is an accepted, deliberate trade-off:
+When `SYNC_PAT` is configured, the sync branch push triggers `build.yaml`, which runs
+upstream's code (`tox`, `pip install`, build steps) **before** a human reviews the diff.
+This is an accepted, deliberate trade-off:
 
 - The same upstream code runs in CI on `develop` after the sync PR is merged anyway, so
-  push-CI only moves execution earlier, it does not create new exposure.
-- Blast radius is minimal: the fork holds **no repository secrets**, and the repo's
-  default workflow token is **read-only** (the `build-and-test` job that runs upstream
-  code declares no elevated permissions, so it inherits that read-only token).
+  pre-merge CI only moves execution earlier, it does not create new exposure.
+- Blast radius is minimal: the fork holds **no repository secrets** other than the PAT,
+  and the repo's default workflow token is **read-only** (the `build-and-test` job that
+  runs upstream code declares no elevated permissions, so it inherits that read-only
+  token — it cannot read `SYNC_PAT`, which is only exposed to the sync job's checkout).
 - The bot never auto-merges. Review the diff — especially any changes under
   `.github/workflows/` or build scripts — before merging.
 
-If upstream trust ever changes, exclude the sync branch from push CI by setting the
-`push` trigger in `build.yaml` to `branches: ['**', '!sync/**']` (note: that edits an
-upstream-maintained file and removes pre-merge CI on sync PRs).
+To stop running upstream code pre-review, delete the `SYNC_PAT` secret: the bot keeps
+working and CI simply moves to post-merge (on `develop`, after your review).
 
 ## One-time local setup (for resolving conflicts by hand)
 
