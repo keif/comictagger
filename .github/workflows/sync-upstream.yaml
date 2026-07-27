@@ -1,0 +1,70 @@
+name: Sync upstream develop
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: develop
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/comictagger/comictagger.git
+          git fetch upstream develop
+
+      - name: Count new upstream commits
+        id: check
+        run: |
+          count=$(git rev-list --count develop..upstream/develop)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Found $count new upstream commit(s)."
+
+      - name: Update sync branch (triggers CI via push)
+        if: steps.check.outputs.count != '0'
+        run: |
+          git branch -f sync/upstream-develop upstream/develop
+          git push --force origin sync/upstream-develop
+
+      - name: Open or update sync PR
+        if: steps.check.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COUNT: ${{ steps.check.outputs.count }}
+        run: |
+          git log --oneline --no-merges develop..upstream/develop > commits.txt || true
+          {
+            echo "Automated weekly sync from \`upstream/develop\`."
+            echo
+            echo "### New commits ($COUNT)"
+            echo '```'
+            cat commits.txt
+            echo '```'
+            echo
+            echo "**Merging:**"
+            echo "- Clean → click **Merge**."
+            echo "- Conflicts → \`git fetch origin && git checkout sync/upstream-develop\`, resolve, push."
+            echo "- After merge: if dependencies changed, run \`./scripts/relock.sh\` and commit \`requirements-dev.lock\`."
+          } > body.md
+          title="Sync upstream develop ($COUNT commits)"
+          existing=$(gh pr list --head sync/upstream-develop --base develop --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --title "$title" --body-file body.md
+          else
+            gh pr create --base develop --head sync/upstream-develop --title "$title" --body-file body.md
+          fi
