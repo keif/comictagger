@@ -38,14 +38,17 @@ uv run pytest
 
 ## Reproducible environments
 
-`requirements-dev.lock` is a fork-only, fully-pinned lock (it does not exist upstream, so
-it never conflicts on merge). To install exactly what's pinned:
+`requirements-dev.lock` is a fork-only, fully-pinned lock compiled from
+`requirements-dev.in`. It pins the editable project, its `all` extra, and the test tools
+(`pytest`, `pytest-qt`), so a single sync gives you an environment that can run the app
+and the test suite. It does not exist upstream, so it never conflicts on merge. To
+reproduce the exact environment:
 ```bash
 uv pip sync requirements-dev.lock
 ```
 
 Regenerate it after any dependency change (including after merging an upstream sync that
-touched `setup.cfg`):
+touched `setup.cfg`, or when you edit `requirements-dev.in`):
 ```bash
 ./scripts/relock.sh
 git add requirements-dev.lock && git commit -m "build: relock dev dependencies"
