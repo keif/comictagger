@@ -126,6 +126,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+uv.lock  # fork uses requirements-dev.lock (tooling-only uv); ignore uv's native project lock
 env/
 venv/
 ENV/
