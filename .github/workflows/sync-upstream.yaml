@@ -28,7 +28,7 @@ jobs:
         run: |
           set -euo pipefail
           git remote add upstream https://github.com/comictagger/comictagger.git
-          git fetch upstream develop
+          git fetch upstream +refs/heads/develop:refs/remotes/upstream/develop
 
       - name: Count new upstream commits
         id: check
