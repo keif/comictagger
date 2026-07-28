@@ -1,0 +1,7 @@
+# Source for the fork-only requirements-dev.lock (compiled by scripts/relock.sh).
+# Includes the editable project, its `all` extra, and the test tools so that
+# `uv pip sync requirements-dev.lock` yields an environment that can run the app
+# and the test suite. Upstream has no equivalent file, so this never conflicts on merge.
+-e .[all]
+pytest>=7
+pytest-qt
