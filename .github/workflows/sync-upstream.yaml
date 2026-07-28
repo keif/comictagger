@@ -43,7 +43,13 @@ jobs:
             exit 0
           fi
 
-          gh pr create --repo "$repo" \
-            --base develop --head comictagger:develop \
-            --title "Sync upstream develop ($ahead commits)" \
-            --body "Automated weekly sync from upstream/develop. The PR head is upstream's own develop branch, so it tracks upstream live and its CI runs in the fork pull_request context (read-only token, no secrets). Review the diff and merge when green; never auto-merged. Conflicts: you cannot push to upstream's branch, so merge locally instead (git fetch upstream; git checkout develop; git merge upstream/develop; resolve; git push origin develop) and this PR closes automatically once no diff remains. After merge, if dependencies changed, run ./scripts/relock.sh and commit requirements-dev.lock."
+          # Use the REST API rather than `gh pr create`: the API reliably accepts an
+          # org-owned cross-repo head (owner:branch), whereas `gh pr create` can reject
+          # it. Verified against comictagger/comictagger.
+          body="Automated weekly sync from upstream/develop. The PR head is upstream's own develop branch, so it tracks upstream live and its CI runs in the fork pull_request context (read-only token, no secrets). Review the diff and merge when green; never auto-merged. Conflicts: you cannot push to upstream's branch, so merge locally instead (git fetch upstream; git checkout develop; git merge upstream/develop; resolve; git push origin develop) and this PR closes automatically once no diff remains. After merge, if dependencies changed, run ./scripts/relock.sh and commit requirements-dev.lock."
+          gh api --method POST "repos/$repo/pulls" \
+            -f title="Sync upstream develop ($ahead commits)" \
+            -f head="comictagger:develop" \
+            -f base="develop" \
+            -f body="$body" \
+            --jq '.html_url'
