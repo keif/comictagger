@@ -25,15 +25,23 @@ sudo apt-get install pkg-config libicu-dev libqt6gui6
 
 ## Set up the environment
 
+For a full dev + test environment (recommended), sync the pinned lock — it installs the
+editable project, all extras, and the test tools (`pytest`, `pytest-qt`):
+```bash
+uv venv
+uv pip sync requirements-dev.lock
+```
+
+Or install just the app from source (no test tools):
 ```bash
 uv venv
 uv pip install -e '.[all]'
 ```
 
-Run the app or tests without activating the venv:
+Run the app or the tests without activating the venv:
 ```bash
 uv run comictagger
-uv run pytest
+uv run pytest        # needs the test tools from the lock sync above
 ```
 
 ## Reproducible environments

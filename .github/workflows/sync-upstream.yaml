@@ -9,6 +9,12 @@ permissions:
   contents: read
   pull-requests: write
 
+# Serialize runs so an overlapping schedule + manual dispatch cannot both observe
+# "no open sync PR" and race into a duplicate-PR POST (the loser would 422).
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
