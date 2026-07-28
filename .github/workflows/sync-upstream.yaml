@@ -6,77 +6,44 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: develop
-          # Push with a PAT (if configured) so the branch push triggers build.yaml.
-          # Pushes made with the default GITHUB_TOKEN do NOT trigger workflow runs
-          # (GitHub suppresses them to prevent recursion). Falls back to the default
-          # token when SYNC_PAT is unset — the bot still runs, just without pre-merge CI.
-          token: ${{ secrets.SYNC_PAT || github.token }}
-
-      - name: Configure git identity
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Fetch upstream
-        run: |
-          set -euo pipefail
-          git remote add upstream https://github.com/comictagger/comictagger.git
-          git fetch upstream +refs/heads/develop:refs/remotes/upstream/develop
-
-      - name: Count new upstream commits
-        id: check
-        run: |
-          set -euo pipefail
-          count=$(git rev-list --count develop..upstream/develop)
-          echo "count=$count" >> "$GITHUB_OUTPUT"
-          echo "Found $count new upstream commit(s)."
-
-      - name: Update sync branch (push via SYNC_PAT triggers CI)
-        if: steps.check.outputs.count != '0'
-        run: |
-          set -euo pipefail
-          git branch -f sync/upstream-develop upstream/develop
-          git push --force origin sync/upstream-develop
-
-      - name: Open or update sync PR
-        if: steps.check.outputs.count != '0'
+      - name: Open sync PR when upstream is ahead
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COUNT: ${{ steps.check.outputs.count }}
+          # A PAT with pull-requests:write is needed to OPEN the PR: a PR opened with
+          # the default GITHUB_TOKEN does not trigger pull_request CI (GitHub suppresses
+          # token-created events). The PR head is upstream's own develop branch, so its
+          # CI runs in the fork pull_request context with NO secret access -- upstream
+          # code can never read SYNC_PAT or any repo secret. Falls back to the default
+          # token when SYNC_PAT is unset (PR still opens, just without pre-merge CI).
+          GH_TOKEN: ${{ secrets.SYNC_PAT || github.token }}
         run: |
           set -euo pipefail
-          git log --oneline --no-merges develop..upstream/develop > commits.txt
-          {
-            echo "Automated weekly sync from \`upstream/develop\`."
-            echo
-            echo "### New commits ($COUNT)"
-            echo '```'
-            cat commits.txt
-            echo '```'
-            echo
-            echo "**Merging:**"
-            echo "- Clean → click **Merge**."
-            echo "- Conflicts → \`git fetch origin && git checkout sync/upstream-develop\`, resolve, push."
-            echo "- After merge: if dependencies changed, run \`./scripts/relock.sh\` and commit \`requirements-dev.lock\`."
-            echo
-            echo "> ⚠️ This branch is **force-updated every Monday**. If you are resolving conflicts on it, finish before the next run or your pushed resolution will be overwritten."
-          } > body.md
-          title="Sync upstream develop ($COUNT commits)"
-          existing=$(gh pr list --head sync/upstream-develop --base develop --state open --json number --jq '.[0].number')
-          if [ -n "$existing" ]; then
-            gh pr edit "$existing" --title "$title" --body-file body.md
-          else
-            gh pr create --base develop --head sync/upstream-develop --title "$title" --body-file body.md
+          repo="${{ github.repository }}"
+
+          ahead=$(gh api "repos/$repo/compare/develop...comictagger:develop" --jq '.ahead_by')
+          echo "upstream/develop is ahead by $ahead commit(s)."
+          if [ "$ahead" = "0" ]; then
+            echo "Nothing to sync."
+            exit 0
           fi
+
+          # Idempotent: reuse an existing open sync PR (head = comictagger:develop).
+          # A cross-fork PR tracks upstream's branch live, so an open one stays current.
+          existing=$(gh pr list --repo "$repo" --base develop --state open \
+            --json number,headRepositoryOwner,headRefName \
+            --jq 'map(select(.headRepositoryOwner.login == "comictagger" and .headRefName == "develop")) | .[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "Sync PR #$existing already open; it tracks upstream/develop live. Nothing to do."
+            exit 0
+          fi
+
+          gh pr create --repo "$repo" \
+            --base develop --head comictagger:develop \
+            --title "Sync upstream develop ($ahead commits)" \
+            --body "Automated weekly sync from upstream/develop. The PR head is upstream's own develop branch, so it tracks upstream live and its CI runs in the fork pull_request context (read-only token, no secrets). Review the diff and merge when green; never auto-merged. Conflicts: you cannot push to upstream's branch, so merge locally instead (git fetch upstream; git checkout develop; git merge upstream/develop; resolve; git push origin develop) and this PR closes automatically once no diff remains. After merge, if dependencies changed, run ./scripts/relock.sh and commit requirements-dev.lock."

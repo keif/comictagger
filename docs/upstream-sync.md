@@ -6,39 +6,42 @@ This fork tracks [`comictagger/comictagger`](https://github.com/comictagger/comi
 ## Automated sync PRs
 
 `.github/workflows/sync-upstream.yaml` runs every Monday (and on-demand via the Actions
-tab → "Sync upstream develop" → "Run workflow"). It:
+tab → "Sync upstream develop" → "Run workflow"). When upstream is ahead, it opens a
+**cross-fork pull request** whose head is upstream's own `develop` branch
+(`base: keif:develop`, `head: comictagger:develop`).
 
-1. Fetches `upstream/develop`.
-2. Force-updates the `sync/upstream-develop` branch to upstream's head.
-3. Opens (or refreshes) a PR into `develop` summarizing the new commits.
+Because the PR head is upstream's live branch:
 
-For the sync PR to show **pre-merge** CI, a `SYNC_PAT` secret must be configured (see the
-next section). Pushes made with the default `GITHUB_TOKEN` do not trigger workflow runs —
-GitHub suppresses them to prevent recursion — so without the PAT the sync PR has no
-pre-merge checks and CI runs only after you merge to `develop`.
+- The PR tracks upstream automatically — new upstream commits update the same PR, so the
+  workflow only needs to open it once (it is idempotent and reuses an open sync PR).
+- Nothing is pushed to this fork, so no unreviewed upstream code ever runs in a
+  same-repository context with access to secrets.
 
 ## One-time: SYNC_PAT for pre-merge CI
 
-Create a fine-grained personal access token scoped to this repository with
-**Contents: write**, then store it as a secret:
+A PR opened with the default `GITHUB_TOKEN` does not trigger `pull_request` CI (GitHub
+suppresses workflow runs from token-created events). To get pre-merge CI, store a
+fine-grained personal access token with **Pull requests: write** (no contents/push scope
+needed) as a secret:
+
 ```bash
 gh secret set SYNC_PAT --repo <owner>/comictagger
 ```
-The sync workflow checks out with this token, so its branch push triggers `build.yaml` on
-the sync branch and the PR shows lint + test results for that exact commit. If the secret
-is absent the workflow still runs (it falls back to the default token), but the sync PR
-gets no pre-merge CI.
+
+The workflow uses this token only to *open* the PR. If the secret is absent the workflow
+still runs (it falls back to the default token), but the sync PR gets no pre-merge CI and
+you rely on CI running post-merge on `develop`.
 
 ## Merging a sync PR
 
-- **Clean merge:** click **Merge** (a merge commit, matching this fork's history).
-- **Conflicts:** GitHub flags the files. Resolve locally:
+- **Clean merge:** review the diff, then click **Merge**.
+- **Conflicts:** you cannot push to upstream's branch, so resolve locally and push to
+  `develop` directly — the PR closes automatically once no diff remains:
   ```bash
-  git fetch origin
-  git checkout sync/upstream-develop
-  git merge develop      # or rebase, per preference
-  # resolve conflicts, commit
-  git push origin sync/upstream-develop
+  git fetch upstream
+  git checkout develop
+  git merge upstream/develop      # resolve conflicts, commit
+  git push origin develop
   ```
 - **After merging:** if the sync changed dependencies (`setup.cfg`), regenerate the lock:
   ```bash
@@ -46,23 +49,15 @@ gets no pre-merge CI.
   git add requirements-dev.lock && git commit -m "build: relock after upstream sync"
   ```
 
-## Security note: pre-merge CI runs upstream code
+## Security note: upstream CI runs without secrets
 
-When `SYNC_PAT` is configured, the sync branch push triggers `build.yaml`, which runs
-upstream's code (`tox`, `pip install`, build steps) **before** a human reviews the diff.
-This is an accepted, deliberate trade-off:
+Pre-merge CI runs on the sync PR in the **fork `pull_request` context**: GitHub gives it a
+read-only `GITHUB_TOKEN` and **no access to repository secrets** (including `SYNC_PAT`).
+So even a compromised upstream commit that adds a malicious workflow cannot exfiltrate a
+secret through this path. `SYNC_PAT` is only ever used by the sync job itself, which runs
+trusted code from this fork's default branch — never upstream's code.
 
-- The same upstream code runs in CI on `develop` after the sync PR is merged anyway, so
-  pre-merge CI only moves execution earlier, it does not create new exposure.
-- Blast radius is minimal: the fork holds **no repository secrets** other than the PAT,
-  and the repo's default workflow token is **read-only** (the `build-and-test` job that
-  runs upstream code declares no elevated permissions, so it inherits that read-only
-  token — it cannot read `SYNC_PAT`, which is only exposed to the sync job's checkout).
-- The bot never auto-merges. Review the diff — especially any changes under
-  `.github/workflows/` or build scripts — before merging.
-
-To stop running upstream code pre-review, delete the `SYNC_PAT` secret: the bot keeps
-working and CI simply moves to post-merge (on `develop`, after your review).
+The bot never auto-merges. Review the diff before merging.
 
 ## One-time local setup (for resolving conflicts by hand)
 
