@@ -42,9 +42,8 @@ jobs:
 
           # Idempotent: reuse an existing open sync PR (head = comictagger:develop).
           # A cross-fork PR tracks upstream's branch live, so an open one stays current.
-          existing=$(GH_TOKEN="$GH_DEFAULT_TOKEN" gh pr list --repo "$repo" --base develop --state open \
-            --json number,headRepositoryOwner,headRefName \
-            --jq 'map(select(.headRepositoryOwner.login == "comictagger" and .headRefName == "develop")) | .[0].number // empty')
+          # Server-side head/base filter is exact and avoids gh pr list's 30-item page.
+          existing=$(GH_TOKEN="$GH_DEFAULT_TOKEN" gh api "repos/$repo/pulls?state=open&base=develop&head=comictagger:develop" --jq '.[0].number // empty')
           if [ -n "$existing" ]; then
             echo "Sync PR #$existing already open; it tracks upstream/develop live. Nothing to do."
             exit 0
