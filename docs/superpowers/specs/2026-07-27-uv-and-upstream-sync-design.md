@@ -1,7 +1,16 @@
 # Design: uv dev tooling + upstream-sync bot
 
 **Date:** 2026-07-27
-**Status:** Approved
+**Status:** Implemented
+
+> **Revision note (post code-review):** Component B was redesigned during implementation.
+> The original plan pushed a `sync/upstream-develop` branch and relied on the existing
+> `push:` CI trigger for pre-merge testing. Code review found this both non-functional
+> (pushes made with the built-in `GITHUB_TOKEN` do not trigger workflow runs) and
+> insecure (forcing CI via a PAT-authenticated push would run unreviewed upstream
+> workflows with access to repository secrets). The shipped design uses a **cross-fork
+> pull request** instead. This document describes what was built; see the plan's
+> "Post-review amendments" for the full deltas.
 
 ## Goal
 
@@ -21,8 +30,9 @@ future upstream merge becomes. The design resolves this by keeping `uv` adoption
 - **Packaging lives in `setup.cfg`**, not `pyproject.toml`'s `[project]` table. Upstream
   declares all dependencies, extras, and entry points there and orchestrates via `tox`.
   Their CI (`build.yaml`, `package.yaml`) is tox-based.
-- **`build.yaml` triggers on both `pull_request:` and `push: branches: ['**']`.** This is
-  load-bearing for Component B (see below).
+- **`build.yaml` triggers on both `pull_request:` and `push: branches: ['**']`.** But note
+  the GitHub rule below: events created with the built-in `GITHUB_TOKEN` do not start new
+  workflow runs, which is why the sync bot needs a cross-fork PR + a PAT to get CI.
 - Our default branch is `develop`; upstream changes historically land on `develop` via
   merge commits.
 
@@ -36,7 +46,7 @@ packaging, and `tox run -m build` still gives release parity.
 
 ```bash
 uv venv
-uv pip install -e '.[all]'
+uv pip install -e '.[all]'   # app only
 uv run comictagger
 ```
 
@@ -45,67 +55,80 @@ migration is required.
 
 ### Reproducible lock (fork-only)
 
-- Generate `requirements-dev.lock` with `uv pip compile` against the project metadata
-  with `--extra all`.
-- Developers reproduce the environment with `uv pip sync requirements-dev.lock`.
-- The lock is a **fork-only artifact** — upstream (tox-based) has no equivalent, so it
-  never conflicts. It is regenerated after any sync that changes dependencies.
-- Rationale: a native `uv.lock` would require moving metadata into `[project]` (the full
-  migration we ruled out). `uv pip compile` is the tooling-only equivalent.
-- The exact compile invocation (source path / flags to read `setup.cfg` extras) is
-  verified during implementation.
+- `requirements-dev.lock` is compiled from `requirements-dev.in`, which lists the editable
+  project plus test tools:
+  ```
+  -e .[all]
+  pytest>=7
+  pytest-qt
+  ```
+- Compiled with `uv pip compile --universal requirements-dev.in -o requirements-dev.lock`
+  (wrapped in `scripts/relock.sh`). The editable entry resolves to a portable `-e .`.
+- `uv pip sync requirements-dev.lock` therefore yields a **full dev + test environment**
+  (editable project + all extras + pytest/pytest-qt), not just runtime dependencies.
+- The lock and `requirements-dev.in` are **fork-only artifacts** — upstream (tox-based)
+  has no equivalent, so they never conflict. Regenerated after any dependency change.
+- uv's native `uv.lock` is gitignored: it would require moving metadata into `[project]`
+  (the full migration we ruled out), and `uv run` regenerates it as a byproduct.
+- Rationale: `uv pip compile` is the tooling-only equivalent of a native lock.
 
 ### macOS ICU handling
 
-`PyICU` is a C extension that builds against ICU. Document the `icu4c` + `pkg-config` +
-`PKG_CONFIG_PATH` / `PATH` setup, mirroring what CI already does at `build.yaml:66-80`:
+`PyICU` is a C extension that builds against ICU. `docs/uv-dev.md` documents the `icu4c` +
+`pkg-config` setup, mirroring CI at `build.yaml:66-80`. On modern Homebrew the formula is
+versioned (`icu4c@78`), so the doc resolves the prefix resiliently:
 
 ```bash
-brew install icu4c pkg-config
-export PKG_CONFIG_PATH="$(brew --prefix icu4c)/lib/pkgconfig"
-export PATH="$(brew --prefix icu4c)/bin:$PATH"
+brew install pkg-config icu4c
+ICU_PREFIX="$(brew --prefix icu4c 2>/dev/null || brew --prefix icu4c@78)"
+export PKG_CONFIG_PATH="$ICU_PREFIX/lib/pkgconfig"
+export PATH="$ICU_PREFIX/bin:$PATH"
 ```
 
 ### Surface area
 
 - `docs/uv-dev.md` — dev setup + lock regeneration instructions.
-- Optionally one thin helper script for lock regeneration.
+- `requirements-dev.in` + `requirements-dev.lock` — fork-only lock source and output.
+- `scripts/relock.sh` — thin lock-regeneration helper (with a `uv`-presence guard).
+- `.gitignore` — ignores uv's native `uv.lock`.
 - No edits to files upstream also edits.
 
-## Component B — Scheduled upstream-sync PR bot
+## Component B — Scheduled upstream-sync PR bot (cross-fork model)
 
 ### One-time setup
 
-Add the upstream remote (documented; the Action fetches by URL and does not depend on a
-persisted local remote):
-
-```bash
-git remote add upstream https://github.com/comictagger/comictagger.git
-```
+- Add the upstream remote locally (for hand-resolving conflicts):
+  ```bash
+  git remote add upstream https://github.com/comictagger/comictagger.git
+  ```
+- Create a fine-grained PAT with **Pull requests: write** only, stored as the `SYNC_PAT`
+  secret. Needed because a PR opened with the default `GITHUB_TOKEN` does not trigger
+  `pull_request` CI. The workflow falls back to the default token if the secret is absent
+  (the PR still opens, just without pre-merge CI).
 
 ### Workflow: `.github/workflows/sync-upstream.yaml`
 
-- **Triggers:** `schedule` (weekly cron) + `workflow_dispatch` (manual run button).
-- **Permissions:** `contents: write`, `pull-requests: write` (built-in `GITHUB_TOKEN`, no
-  PAT required).
-- **Logic:**
-  1. Check out `develop` at full depth.
-  2. Fetch `upstream/develop` by URL.
-  3. Force-update a `sync/upstream-develop` branch to upstream's head.
-  4. Push the branch — this fires CI via the `push: '**'` trigger.
-  5. Open or refresh a PR into `develop` using `gh`, with a body summarizing the new
-     commits. Idempotent: reuse the existing open PR if one exists.
+- **Triggers:** `schedule` (weekly, Mondays 06:00 UTC) + `workflow_dispatch`.
+- **Permissions:** `contents: read`, `pull-requests: write`. A `concurrency` group
+  serializes overlapping runs.
+- **Logic (single job, no checkout, no branch push):**
+  1. Compare `develop...comictagger:develop` via the REST API to count how far upstream is
+     ahead (using the default token, which has `contents: read`). Exit if zero.
+  2. Check for an existing open sync PR with a server-side filter
+     (`head=comictagger:develop&base=develop`) — idempotent and exhaustive.
+  3. If none, open a **cross-fork PR** (`base: develop`, `head: comictagger:develop`) via
+     `POST repos/{repo}/pulls` (the REST API accepts an org-owned cross-repo head where
+     `gh pr create` may not). This call uses `SYNC_PAT` so the PR triggers CI.
+- **Why cross-fork:** the PR head is upstream's own branch, so (a) nothing is pushed to the
+  fork, (b) the PR tracks upstream live (new upstream commits update the same PR), and
+  (c) pre-merge CI runs in the **fork `pull_request` context** — read-only token, **no
+  access to repository secrets**. A compromised upstream commit cannot exfiltrate `SYNC_PAT`
+  or any secret through this path.
 - **Conflict policy:** the bot **never auto-resolves conflicts and never auto-merges.**
-  - Clean merge → maintainer clicks Merge (same merge-commit pattern already in history).
-  - Conflict → GitHub flags the files; maintainer pulls the branch and resolves locally.
-
-### Why CI still runs (design-critical)
-
-PRs opened by the built-in `GITHUB_TOKEN` do **not** trigger `pull_request` workflows (an
-anti-recursion safety measure). Normally that would leave a sync PR with zero checks.
-Because `build.yaml` **also** runs on `push` to any branch, pushing `sync/upstream-develop`
-triggers CI on that exact commit, and the results attach to the PR by commit SHA. This
-gives us tested sync PRs **without** a personal access token.
+  - Clean merge → maintainer clicks Merge.
+  - Conflict → you cannot push to upstream's branch, so merge locally and push to
+    `develop` (`git fetch upstream && git merge upstream/develop`); the PR closes when no
+    diff remains.
 
 ### Cadence
 
@@ -113,7 +136,7 @@ Weekly.
 
 ### Post-sync lock refresh
 
-When a sync changes dependencies, regenerate `requirements-dev.lock` via `uv pip compile`.
+When a sync changes dependencies, regenerate `requirements-dev.lock` via `scripts/relock.sh`.
 Kept as a documented manual/scripted step rather than baked into the bot — this keeps the
 bot's responsibility to exactly one thing (surface upstream as a PR).
 
@@ -126,9 +149,10 @@ bot's responsibility to exactly one thing (surface upstream as a PR).
 
 ## Testing
 
-- **Component A:** verify `uv venv` + `uv pip install -e '.[all]'` produces a working
-  `comictagger` launch and that `uv run pytest` passes; verify `uv pip compile` yields a
-  lock that `uv pip sync` installs cleanly.
-- **Component B:** validate the workflow with `workflow_dispatch` (manual run) before
-  relying on the schedule; confirm a `sync/*` push produces CI checks visible on the PR;
-  confirm the idempotent path reuses an existing PR rather than erroring.
+- **Component A:** `uv venv` + `uv pip install -e '.[all]'` produces a working
+  `comictagger` launch; `uv pip sync requirements-dev.lock` yields an env that imports the
+  project + `pytest`; `uv run pytest` passes (435 passed at implementation).
+- **Component B:** the cross-fork PR direction was verified against the live API (a 422
+  "no commits between" confirms the direction is accepted, only the diff was empty). The
+  workflow becomes dispatchable only once merged to `develop` (GitHub gates
+  `workflow_dispatch` on the default branch); validate with a manual dispatch after merge.

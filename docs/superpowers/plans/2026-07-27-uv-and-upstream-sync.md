@@ -4,9 +4,49 @@
 
 **Goal:** Adopt `uv` for local development and add a scheduled GitHub Action that surfaces upstream `comictagger/comictagger` `develop` changes as reviewable PRs.
 
-**Architecture:** Tooling-only uv adoption — `setup.cfg`/`tox` stay untouched as upstream's source of truth, so merges never conflict on packaging. A fork-only `requirements-dev.lock` (via `uv pip compile`) gives reproducible envs. A weekly `workflow_dispatch`-able Action force-updates a `sync/upstream-develop` branch to upstream's head and opens/refreshes a PR into `develop`; CI runs via the existing `push: '**'` trigger, so no PAT is needed.
+**Architecture:** Tooling-only uv adoption — `setup.cfg`/`tox` stay untouched as upstream's source of truth, so merges never conflict on packaging. A fork-only `requirements-dev.lock` (via `uv pip compile`) gives reproducible envs. A weekly `workflow_dispatch`-able Action opens a **cross-fork PR** (head = upstream's own `develop`) into `develop`; pre-merge CI runs safely in the fork `pull_request` context using a `pull-requests:write` `SYNC_PAT`. **(Component B was redesigned during code review — the Task 6 / Task 8 steps below reflect the original push-branch approach that was superseded; see "Post-review amendments" for the shipped design.)**
 
 **Tech Stack:** `uv` 0.11+, GitHub Actions, `gh` CLI, existing setuptools + tox packaging.
+
+---
+
+## Post-review amendments (shipped design)
+
+The tasks below were executed as written, then evolved through the `/codex review` gate.
+The record of tasks is preserved; this section states what actually shipped.
+
+**Component A — lock now includes the project + test tools:**
+- `requirements-dev.lock` is compiled from a new `requirements-dev.in` (`-e .[all]`,
+  `pytest>=7`, `pytest-qt`), not from `setup.cfg`'s `all` extra alone. So
+  `uv pip sync requirements-dev.lock` yields a runnable app **and** test env; the editable
+  entry resolves to a portable `-e .`. (Task 3/Task 5 fix.)
+- `scripts/relock.sh` compiles from `requirements-dev.in` and has a `uv`-presence guard.
+- `.gitignore` ignores uv's native `uv.lock` (comment on its own line — an inline comment
+  does not work in `.gitignore`).
+- macOS docs resolve `icu4c` resiliently (`icu4c@78` on modern Homebrew).
+
+**Component B — cross-fork PR instead of a pushed branch (the big change):**
+- Root problem found in review: pushes made with the built-in `GITHUB_TOKEN` do **not**
+  trigger workflow runs, so the "`push: '**'` gives free CI" premise was false. Forcing CI
+  via a PAT-authenticated push would run unreviewed upstream workflows **with access to
+  repository secrets** — a secret-exfiltration vector.
+- Shipped instead: the workflow opens a **cross-fork PR** (`base: develop`,
+  `head: comictagger:develop`) via `POST repos/{repo}/pulls`. No branch is pushed to the
+  fork; the PR tracks upstream live; pre-merge CI runs in the fork `pull_request` context
+  (read-only token, **no secret access**).
+- The bot uses the default token (which has `contents: read`) for the read-only
+  compare/list calls, and `SYNC_PAT` (fine-grained, **pull-requests:write only**) solely to
+  open the PR — needed because a `GITHUB_TOKEN`-opened PR does not trigger CI.
+- Workflow permissions are `contents: read` + `pull-requests: write` (no `contents: write`,
+  no push). A `concurrency` group serializes overlapping runs. Existing-PR lookup uses a
+  server-side `head`/`base` filter (exhaustive, no 30-item pagination gap). PR creation uses
+  the REST API because `gh pr create` can reject an org-owned cross-repo head.
+- Conflict resolution: you cannot push to upstream's branch, so merge locally and push to
+  `develop`; the PR closes when no diff remains.
+
+**Validation reality:** the sync workflow cannot be dispatched until it is on the default
+branch (`develop`) — GitHub gates `workflow_dispatch` there. The cross-fork PR direction
+was instead verified against the live API. `build.yaml` CI passed on the feature branch.
 
 ---
 
